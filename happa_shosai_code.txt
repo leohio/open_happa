@@ -1,0 +1,399 @@
+/*mainの内容は以下の通り
+ブロックチェーンダウンロードdownloadChainRequest
+→
+ブロックチェーン初期検証callbackDownloadChain
+→
+ブロックチェーン完全検証用データをTwitterからダウンロード get_all_tweet
+→
+ブロックチェーン完全検証＆最終ブロック決定　checkAllChain　→　findLastBlock
+→
+ブロック生成 make_block
+→
+ブロック追加＆アップロード uploadChainRequest
+*/
+
+var my_account_name = "";
+var the_res;
+var tweets_cash = {}
+var all_account=[]
+var json_blocks=[];
+var MAX_ID = {};
+
+//参考までにブロックのテンプレを見て下さい
+
+var block_template = {
+    //ブロックの番号
+    "number": null,
+    //ブロックを作った人
+    "owner": null,
+    //このブロックがつながっているブロック
+    "inherit": null,
+    //各アカウントの残高
+    "scores": {"@me": ["point=1000", "last_id:12345678"]}
+};
+function startMining(data) {
+    console.log(data);
+    //鍵垢を排除
+    if (data.protected) {
+        $("#score-board").html("<p>きさまぁ！鍵垢だな！！？</p><p>よくそれでHappa吸えると思えたな！！お外へポイだ！</p>");
+        return;
+    }
+
+    my_account_name = my_account_name || data.screen_name;
+
+    //ブロックチェーンの初歩的なチェックをmake_candidate1で行い、調べるべきアカウントをリストアップします
+    function easyBlockChainCheck() {
+        console.log("==========TRIGGER!==========")
+        var defer = $.Deferred();
+        var callbackDownloadChain = function (res) {
+            $("#score-board").html("<p>BLOCKCHAIN DOWNLOAD</p><p>" + res + "</p>");
+            json_blocks = JSON.parse(res);
+            if (my_account_name == json_blocks[json_blocks.length-1].owner) {
+                $("#score-board").html("<p>え？またお前？</p><p>５１％攻撃したいの？</p>");
+                defer.reject();
+                return;
+            }
+            candidate1 = make_candidate1(json_blocks);
+
+            for (var num in candidate1) {
+                if (String(num) !== "0") {
+                    console.log(num);
+                    hsh = make_hash(json_blocks[num]);
+                    if (all_account.indexOf(hsh) === -1) {
+                        all_account.push(make_hash(json_blocks[num]));
+                    }
+                }
+            }
+            all_account.push(my_account_name+"\t"+null+"\t"+null);
+            defer.resolve();
+        }
+        
+        //ブロックチェーンをダウンロード→　通信が終わったらブロックチェーンの初歩的チェック
+        $.ajax(downloadChainRequest()).then(callbackDownloadChain, callbackError);
+        return defer.promise();
+    }
+
+    //easyBlockChainCheckで作られた調べるべきTwitterアカウントのリストall_accountにあるユーザーの
+    //ツイートを全部収集する
+    function collectTweetData() {
+        console.log("==========TRIGGER2!==========")
+        var defer = $.Deferred();
+        var get_all_tweet = function (account_list,index,res){
+            if(res&&res[0]){
+                //前の呼び出し時のツイートを保存
+                tweets_cash[account_list[index-1]] = res;
+                MAX_ID[account_list[index-1]] = res[0]["id"];
+            }else if(res!==null){
+                tweets_cash[account_list[index-1]] = [];
+                MAX_ID[account_list[index-1]] = parseInt(account_list[index-1].split("\t")[2]);
+            }
+            //終わったら次のフラグを立てて帰る
+            if(index>=account_list.length){
+                defer.resolve();
+                return;
+            }
+            //次を送る
+            var inp = account_list[index].split("\t");
+            the_res.get(get_tweet_by_term(inp[0],inp[1],inp[2])).done(get_all_tweet.bind(null,account_list,index+1)).fail(callbackError);
+        }
+        get_all_tweet(all_account,0,null);
+        return defer.promise();
+    }
+    easyBlockChainCheck().then(collectTweetData).then(checkAllChain, callbackError);
+}
+
+function findLastBlock(inherit,first=true){
+
+    var result = {};
+    var max = 0;
+
+    //チェーンの長さを調べる。途中でdenyされてたら0
+    function check_chain(block_num,count){
+      var next=inherit[block_num]
+      if(next==block_num){return 0;
+      }else if(next=="deny"){
+          return 0;
+      }else if(!next){return count+1}
+      else{return check_chain(next,count+1)}
+    }
+
+    //チェーンの長さランキング作る
+    for(var key in inherit){
+      var num =check_chain(key,0)
+      if (num>max){max=num;}
+      if (result[num]){result[num].push(key)}
+      else{result[num] = [key]}
+    }
+    console.log(result)
+    //最良の候補のうち最も古いブロックを返す
+    return Math.min(...result[max])
+}
+
+function tweetScore(tweet_object) {
+    //var favo = tweet_object.favorite_count;
+    var retw = tweet_object.retweet_count;
+    var score = retw;
+    return score;
+}
+
+function allTweetsScore(tweets) {
+    var total_score = 0;
+    tweets.forEach(function (tweet) {
+        var tweet_score = tweetScore(tweet);
+        var is_applicable = applicable(tweet);
+        if (is_applicable && tweet_score > 0) {
+            total_score += tweet_score;
+            output(tweet.id, tweet.text, tweet.retweet_count);
+        }
+    });
+    return total_score;
+}
+
+function applicable(tweet_object) {
+    //var text = tweet_object.text;
+    //var hashtags = tweet_object.entities.hashtags;
+    var urls = tweet_object.entities.urls;
+    var is_retweet_status = (tweet_object.retweeted_status != void 0);
+    var is_quote_status = tweet_object.is_quote_status;
+    if (is_retweet_status || is_quote_status) {
+        //リツイートまたは引用リツイートならば除外
+        return false;
+    }
+    in_external_url_status = urls.some(function (url) {
+        //url のドメインが twitter.com でないものが含まれているならば該当
+        return !(/https:\/\/twitter\.com/.test(url.expanded_url));
+    });
+    return in_external_url_status;
+}
+
+//ツイートの内容を表示する関数です
+//ここでは省略させて頂きます
+function output(tweet_id, tweet_text, retweet_count) {
+    console.log(tweet_text)
+}
+
+function callbackError(err) {
+    console.log(err);
+}
+
+//ここでは省略させて頂きます
+function sendDataRequest(screen_name, tweets) {
+}
+
+function callbackReturn() {
+ 
+}
+
+function get_tweet_by_term(user_name, since_id, max_id) {
+    var pool = [null,undefined,"null","undefined"]
+    var api_url = "1.1/statuses/user_timeline.json?screen_name=";
+    api_url += encodeURIComponent(user_name);
+    api_url += "&count=200&";
+    if(pool.indexOf(since_id)===-1){
+      api_url += "&since_id=";
+      api_url += since_id;
+    }
+    if(pool.indexOf(max_id)===-1){
+      api_url += "&max_id=";
+      api_url += max_id;
+    }
+    return api_url
+}
+
+//最後に実行される関数
+//ブロックを作り、アップロードします
+function make_block(screen_name,last_json_block) {
+  var new_block;
+  mypoint = last_json_block[screen_name];
+  if (mypoint){
+    since_id=mypoint[1];
+    my_last_point = mypoint[0];
+  } else {
+    since_id=null;
+    my_last_point=0;
+  }
+  var name_key = screen_name+"\t"+since_id+"\t"+null;
+  var tweets = tweets_cash[name_key];
+  var last_id = MAX_ID[name_key];
+
+  recent_tweets = []
+  tweets.forEach(function(tw){if(tw["id"]>since_id){recent_tweets.push(tw)}})
+  var my_score = allTweetsScore(recent_tweets);
+
+  if (Number(my_score) === 0) {
+      $("#score-board").html("<p>今回の報酬はないみたいですね</p><p>ブロックは生成しません</p>");
+      return;
+  }
+
+  last_json_block["scores"][screen_name] = [my_score + my_last_point, last_id];
+  last_json_block["inherit"] = last_json_block["number"];
+  last_json_block["number"] = json_blocks[json_blocks.length-1]["number"]+1;
+  last_json_block["owner"] = screen_name;
+
+  console.log("NEW", last_json_block);
+  new_block = JSON.stringify(last_json_block);
+  $.ajax(uploadChainRequest(new_block)).done(function(res){
+    console.log(res);
+    $("#score-board").html("<p>BLOCKCHAIN DOWNLOAD</p><p>" + res + "</p>");
+  });
+}
+
+
+//各ブロックはOwner以外の残高が変化することはない。その時点でinherit候補から除外
+function check_accounts(scores1,scores2,owner){
+
+  for (var account in scores1){
+    if (account!=owner){
+      if(scores1[account]!==scores2[account]){
+        console.log("account miss!!!!!!!!!!!!")
+        return false
+      };
+    }
+  }
+  return true
+}
+
+//新しく作るブロックのinherit先の候補を見つける
+function make_candidate1(json_blocks){
+  var result = {};
+  //check whether accounts not in changelist in inherit block is same in the new block
+  function check_accounts(scores1,scores2,owner){
+
+    for (var account in scores1){
+      if (account!=owner){
+        if(scores1[account][0]!==scores2[account][0]){return false};
+      }
+    }
+    return true
+  }
+
+      //jsonblocksを新しい順（逆順）に辿って途中breakする
+  for (var key=json_blocks.length;key>=json_blocks.length-30;key--){
+    json_block = json_blocks[key];
+    if (json_block) {
+      inherit_block = json_blocks[json_block.inherit];
+      if(check_accounts(json_block.scores,inherit_block.scores,json_block.owner)){
+        result[json_block.number]=inherit_block.number
+      }else{
+        result[json_block.number]="deny"
+      }
+    }
+  };
+  for (var key in result){
+    if(result[key]=="deny"){
+      update_candidate(result,key)
+    }
+  }
+  console.log("make_candidate1",result)
+  return result
+}
+
+//ダメだったinherit候補以下を再帰的に除外する
+function update_candidate(candidate,number){
+
+  if(candidate[number]!=="deny"){
+    candidate[number]="deny"
+    for(var num in candidate){
+      if(candidate[num]==number){
+        update_candidate(candidate,num)
+      }
+    }
+  }
+  return candidate
+}
+
+//Ownerの残高変化に不正がないかチェック
+function check_owner_point(block){
+
+  console.log(block.number)
+  if(block.number==0){return true}
+  var hash = make_hash(block)
+  var tweets = tweets_cash[hash]
+  var points = allTweetsScore(tweets)
+  var last_point = inherit_block.scores[block.owner]
+  if(last_point){last_point=last_point[0]}else{last_point=0}
+  var this_point = block.scores[block.owner]
+  if(this_point){this_point=this_point[0]}else{this_point=0}
+
+  if(points>10){
+    return (Math.abs(points*0.8)<=Math.abs(this_point-last_point)
+          && Math.abs(this_point-last_point)<=Math.abs(points*1.2))
+  }else{
+    console.log("もんだい")
+    console.log(points,this_point,last_point)
+    return Math.abs(points)<=Math.abs(this_point-last_point)
+  }
+}
+
+//TweetCashを作る時、検索アカウント+since_id+max_idをキーにして値を入れたい
+function make_hash(block,inherit_block=null,user=null){
+  if(user==null){
+    var user = block.owner
+  }
+  if(inherit_block==null){
+    inherit_block = json_blocks[block.inherit]
+  }
+  console.log(inherit_block);
+
+  var since_id = inherit_block.scores[user]
+  if(since_id){since_id = since_id[1]}else{since_id=null}
+  var max_id = block.scores[user]
+  if(max_id){max_id = max_id[1]}else{max_id=null}
+
+  return user+"\t"+since_id+"\t"+max_id
+}
+
+//Tweet情報も含めてチェーンをチェック
+function checkAllChain(){
+    console.log("CANDIDATE")
+    console.log(candidate1)
+    for(var num in candidate1){
+        var det =check_owner_point(json_blocks[num])
+        if(!det){
+          candidate1[num]="deny"
+          $("#score-board").html("<p>" + json_blocks[num].owner + "はブロックチェーンからハズレました</p>");
+        }
+    }
+    //ここでinherit先が決まる
+    var last_block_number = findLastBlock(candidate1)
+    var last_block = json_blocks[last_block_number]
+    console.log("LAST", last_block);
+    //clearInterval(interval2)
+    //ブロックを生成して、アップロードする
+    make_block(my_account_name, last_block);
+}
+
+function downloadChainRequest() {
+    var url = 'https://059i2a5cg8.execute-api.ap-northeast-1.amazonaws.com/prod/getbalance';
+    var data = {
+        name: "DOWNLOAD"
+    };
+
+    return {
+        type: 'GET',
+        url: url,
+        data: data,
+        dataType: "json",
+        contentType: 'application/json'
+    };
+}
+
+//ここでは省略させて頂きます
+//ブロックをアップロード
+function uploadChainRequest(json) {
+}
+
+//認証
+function callbackGetInfo(res) {
+    var api_url = "1.1/account/verify_credentials.json";
+    the_res = res;
+    the_res.get(api_url).done(startMining).fail(callbackError);
+}
+
+//メイン処理（ここから全部始まる）
+function main() {
+    OAuth.popup('twitter').done(callbackGetInfo).fail(callbackError).always(callbackReturn);
+}
+
+OAuth.initialize('PUBLIC KEY');
+
